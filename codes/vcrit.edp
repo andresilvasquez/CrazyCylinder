@@ -1,0 +1,226 @@
+load "iovtk"
+load "UMFPACK64"
+
+// ============================================================
+// PARAMETROS FISICOS
+// ============================================================
+real wr = 0.088; // (0.033, 0.044, 0.066) 
+real R = 0.011;
+real w = 1.0 * wr;
+real dw = (2*R)/wr;
+real h = 4 * w;
+real xc = 0.5 * w;
+real yc = 0.75 * h;
+int meshSize = 50;
+real ratio = h / w;
+real mulabel = 1.0;
+real mu = mulabel * 1.0e-3;
+real vin = 0.0095; // (0.023, 0.044, 0.078, 0.111, 0.143);
+real rhoF = 1000.0;
+real rhoS = 1030.0; // (1030, 1105, 1270, 1380) mid(1205)
+real dt = 0.01;
+int  Tmax = 500;
+real eps = 1e-9;
+real hmin = R/20;
+real hmax = h/8;
+real l = 0.6;
+real Vl = 0;
+real Vx = 0;
+real g = 9.77;
+real s = 0.05 * wr; 
+real t = 0;
+real Re = vin * 2 * R * rhoF / mu * (1.0 + 1.0 / (w/(2*R)-1));
+int inside = 0;
+string vtkBase = "output/flow";
+int[int] orderOut = [1,1,1,1,1,1,1]; 
+
+// ============================================================
+// MALLA
+// ============================================================
+mesh Mesh;
+{
+    border w1(t=0.,1.){ x=w*t;   y=0.;    label=1; };
+    border w2(t=0.,1.){ x=w;     y=h*t;   label=2; };
+    border w3(t=0.,1.){ x=w-w*t; y=h;     label=3; };
+    border w4(t=0.,1.){ x=0.;    y=h-h*t; label=4; };
+    border c(t=0,2*pi){ x=xc+R*cos(t); y=yc+R*sin(t); label=5; };
+    Mesh = buildmesh(w1(meshSize) + w2(ratio*meshSize) + w3(meshSize)
+                   + w4(ratio*meshSize) + c(meshSize));
+}
+//plot(Mesh, wait=true);
+
+// ============================================================
+// ESPACIOS SEPARADOS
+// ============================================================
+fespace Vh(Mesh, P2);
+fespace Ph(Mesh, P1);
+fespace Sh(Mesh, P1);
+fespace Dh(Mesh, P1);
+
+Vh ux, uy, vx, vy, uxOld, uyOld, umag, uxInterpolated, uyInterpolated, vorticity;
+Ph p, q;
+Sh chiB, rho;
+Dh dmesh, vdmesh, umeshx;
+umeshx = 0;  
+
+// ============================================================
+// STOKES COMO CONDICION INICIAL
+// ============================================================
+macro Ddu(a,b,c,d) (
+    2*dx(a)*dx(c) + 2*dy(b)*dy(d)
+  + (dy(a)+dx(b))*(dy(c)+dx(d))
+) // EOM
+
+problem Stokes([ux, uy, p], [vx, vy, q], solver=UMFPACK)
+    =   int2d(Mesh)( mu*(dx(ux)*dx(vx)+dy(ux)*dy(vx)
+                       + dx(uy)*dx(vy)+dy(uy)*dy(vy)) )
+    -   int2d(Mesh)( p*(dx(vx)+dy(vy)) )
+    -   int2d(Mesh)( q*(dx(ux)+dy(uy)) )
+    +   int2d(Mesh)( 1e-10*p*q )
+    +   on(2, ux=0, uy=-vin)
+    +   on(3, ux=0, uy=-vin)
+    +   on(4, ux=0, uy=-vin)
+    +   on(5, ux=0, uy=0);
+
+Stokes;
+real pMedia = int2d(Mesh)(p) / int2d(Mesh)(1.0);
+p[] -= pMedia;
+umag = sqrt(ux^2 + uy^2);
+
+Mesh = adaptmesh(Mesh,
+                     umag, p,           // campos guia para el refinamiento
+                     err    = 0.05,     // tolerancia de error (mas bajo = mas fino) (0.01)
+                     hmin   = R/50,     // tamano minimo elemento
+                     hmax   = h/10,     // tamano maximo de elemento
+                     ratio  = 1.5,      // suavidad creo (1.2)
+                     nbvx   = 100000    // max numero de vertices
+                    );
+//plot(Mesh);
+
+ux = ux; uy = uy; p = p;
+
+Stokes;
+cout << "Stokes resuelto. Vin=" << vin 
+     << "; dt=" << dt 
+     << "; rhoS=" << rhoS
+     << "; N=" << meshSize
+     << "; Tmax=" << Tmax << endl;
+
+string outputFileName = dw + "_" + rhoS + "_" + vin + "_" + Re + ".txt";
+string vtkDir = dw + "_" + rhoS + "_" + vin + "_" + Re;
+
+system("mkdir -p " + vtkDir);
+
+ofstream out(outputFileName);
+out << "t x vx" << endl;
+
+// ============================================================
+// CAMPOS INICIALES
+// ============================================================
+chiB = ( (x-xc)^2+(y-yc)^2 <= R^2 ) ? 1.0 : 0.0;
+rho  = rhoF*(1.0-chiB) + rhoS*chiB;
+
+// ============================================================
+// BUCLE TEMPORAL
+// ============================================================
+for (int n = 0; n < Tmax; n++) {
+
+    uxOld = ux;
+    uyOld = uy;
+    umag  = sqrt(ux^2+uy^2);
+    vorticity = dy(ux) - dx(uy);
+
+    real Co = umag[].max * dt / hTriangle;
+
+    t += dt;
+
+    real fxResorte = -rhoS * g * (xc - w/2.0) / l;
+
+    problem NavierStokes([ux, uy, p], [vx, vy, q], solver=UMFPACK)
+        =   int2d(Mesh)( (rho/dt)*(ux*vx+uy*vy) )
+        +   int2d(Mesh)( mu*Ddu(ux,uy,vx,vy) )
+        +   int2d(Mesh)( (mu/eps)*chiB*Ddu(ux,uy,vx,vy) )
+        +   int2d(Mesh)( (1.0/eps)*chiB*uy*vy )
+        -   int2d(Mesh)( p*(dx(vx)+dy(vy)) )
+        -   int2d(Mesh)( q*(dx(ux)+dy(uy)) )
+        +   int2d(Mesh)( 1e-10*p*q )
+        -   int2d(Mesh)( (rho/dt)*(
+                convect([uxOld-umeshx, uyOld], -dt, uxOld)*vx
+              + convect([uxOld-umeshx, uyOld], -dt, uyOld)*vy ))
+        + int2d(Mesh)( chiB * fxResorte * vx ) 
+        +   on(1, ux=0, uy=-vin)
+        +   on(2, ux=0, uy=-vin)
+        +   on(3, ux=0, uy=-vin)
+        +   on(4, ux=0, uy=-vin);
+
+    NavierStokes;
+
+    // Corregir media de presion — p es Ph escalar, operacion directa
+    real pMed = int2d(Mesh)(p) / int2d(Mesh)(1.0);
+    p[] -= pMed;
+
+    // Posicion del cilindro
+    real areaB = int2d(Mesh)(chiB);
+    real Vl    = int2d(Mesh)(ux*chiB) / areaB;
+    
+
+    real Fhidro = int1d(Mesh, 5)(
+        (- p + 2*mu*dx(ux))*(x-xc)/R
+        + mu*(dy(ux)+dx(uy))*(y-yc)/R
+        );
+    Vx += Fhidro*dt;
+
+    xc = xc + dt*Vx;
+
+    out << t << " " << xc << " " << Vx << endl;
+
+    varf vPoisson(dmesh, vdmesh)
+        =   int2d(Mesh)( dx(dmesh)*dx(vdmesh) + dy(dmesh)*dy(vdmesh) )
+        +   on(5, dmesh=Vx*dt)
+        +   on(1,2,3,4, dmesh=0);
+    
+    matrix PoissonMat = vPoisson(Dh, Dh);
+    set(PoissonMat, solver=UMFPACK);
+    real[int] PoissonRHS = vPoisson(0, Dh);
+    dmesh[] = PoissonMat^-1 * PoissonRHS;
+
+    umeshx = dmesh / dt;
+
+    Mesh = movemesh(Mesh, [x + dmesh, y]);
+
+    chiB = ( (x-xc)^2+(y-yc)^2 < (1.0 * R)^2 ) ? 1.0 : 0.0;
+    rho  = rhoF*(1.0-chiB) + rhoS*chiB;
+
+    ux = ux;    uy = uy;    p  = p;
+    uxOld = uxOld; uyOld = uyOld;
+    umeshx = umeshx; dmesh = dmesh;
+
+    inside = ((xc-R) < 1.5*s || (xc+R) > (w-1.5*s)) ? 1.0 : 0.0;
+
+    if (n > 0) {
+        real divErr = sqrt(int2d(Mesh)((dx(ux)+dy(uy))^2));
+        real uNorm  = sqrt(int2d(Mesh)(ux^2+uy^2));
+        if (inside == 1.0) {
+            dt = 0.2 * hTriangle / (umag[].max + 1e-10);  // CFL = 0.8
+        } else {
+            dt = 0.5 * hTriangle / (umag[].max + 1e-10);  // CFL = 0.8
+        }
+        dt = min(dt, 0.5);
+        dt = max(dt, 1e-5);
+    }
+
+    cout << "n=" << n
+         << "  |xc-w/2|/d=" << abs(xc-0.5*w)/(2*R) * 100
+         << "  V=" << vin
+         << "  Re=" << Re
+         << "  Co=" << Co
+         << " dt=" << dt 
+         << " inside=" << inside << endl;
+//         << "  nv=" << Mesh.nv
+//         << "  div/u=" << divErr*w/uNorm << endl;
+
+    savevtk(vtkDir + "/test_"+n+".vtu", Mesh, ux, uy, vorticity, dmesh,
+            [ux, uy, 0], p, chiB,
+            dataname="ux uy vorticity d velocity pressure cylinder",
+            order=orderOut);
+}
