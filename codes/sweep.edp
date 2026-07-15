@@ -1,0 +1,279 @@
+load "iovtk"
+load "UMFPACK64"
+include "getARGV.idp"
+
+// ============================================================
+// PARAMETROS DESDE CONSOLA
+// ============================================================
+real wr   = getARGV("-wr",   0.066);
+real rhoS = getARGV("-rhoS", 1030.0);
+real vin  = getARGV("-vin",  0.143);
+real mulabel = getARGV("-mulabel", 1.0);
+real l       = getARGV("-l",       0.6);
+
+// ============================================================
+// PARAMETROS FISICOS
+// ============================================================
+real R       = 0.011;
+real w       = 1.0 * wr;
+real dw      = (2*R)/wr;
+real h       = 4 * w;
+real xc      = 0.5 * w;
+real yc      = 0.75 * h;
+int  meshSize = 50;
+real ratio   = h / w;
+real mu      = mulabel * 1.0e-3;
+real rhoF    = 1000.0;
+real dt      = 0.01;
+int  Tmax    = 500;
+real eps     = 1e-9;
+real Vl      = 0;
+real Vx      = 0;
+real g       = 9.77;
+real s       = 0.05 * wr;
+real t       = 0;
+int  inside  = 0;
+bool meshError = false;
+int[int] orderOut = [1,1,1,1,1,1];
+
+real xcInit = xc;   // valor inicial para restaurar cada repeticion
+
+// ============================================================
+// MALLA
+// ============================================================
+mesh Mesh;
+{
+    border w1(t=0.,1.){ x=w*t;   y=0.;    label=1; }
+    border w2(t=0.,1.){ x=w;     y=h*t;   label=2; }
+    border w3(t=0.,1.){ x=w-w*t; y=h;     label=3; }
+    border w4(t=0.,1.){ x=0.;    y=h-h*t; label=4; }
+    border c(t=0,2*pi){ x=xc+R*cos(t); y=yc+R*sin(t); label=5; }
+    Mesh = buildmesh(w1(meshSize) + w2(ratio*meshSize) + w3(meshSize)
+                   + w4(ratio*meshSize) + c(meshSize));
+}
+
+// ============================================================
+// ESPACIOS
+// ============================================================
+fespace Vh(Mesh, P2);
+fespace Ph(Mesh, P1);
+fespace Sh(Mesh, P1);
+fespace Dh(Mesh, P1);
+
+Vh ux, uy, vx, vy, uxOld, uyOld, umag, uxInterpolated, uyInterpolated;
+Ph p, q;
+Sh chiB, rho;
+Dh dmesh, vdmesh, umeshx;
+umeshx = 0;
+
+// ============================================================
+// STOKES INICIAL + ADAPTMESH (una sola vez)
+// ============================================================
+macro Ddu(a,b,c,d) (
+    2*dx(a)*dx(c) + 2*dy(b)*dy(d)
+  + (dy(a)+dx(b))*(dy(c)+dx(d))
+) // EOM
+
+problem Stokes([ux, uy, p], [vx, vy, q], solver=UMFPACK)
+    =   int2d(Mesh)( mu*(dx(ux)*dx(vx)+dy(ux)*dy(vx)
+                       + dx(uy)*dx(vy)+dy(uy)*dy(vy)) )
+    -   int2d(Mesh)( p*(dx(vx)+dy(vy)) )
+    -   int2d(Mesh)( q*(dx(ux)+dy(uy)) )
+    +   int2d(Mesh)( 1e-10*p*q )
+    +   on(2, ux=0, uy=-vin)
+    +   on(3, ux=0, uy=-vin)
+    +   on(4, ux=0, uy=-vin)
+    +   on(5, ux=0, uy=0);
+
+Stokes;
+real pMedia = int2d(Mesh)(p) / int2d(Mesh)(1.0);
+p[] -= pMedia;
+umag = sqrt(ux^2 + uy^2);
+
+Mesh = adaptmesh(Mesh,
+                 umag, p,
+                 err   = 0.05,
+                 hmin  = R/50,
+                 hmax  = h/10,
+                 ratio = 1.5,
+                 nbvx  = 100000);
+
+ux = ux; uy = uy; p = p;
+Stokes;
+pMedia = int2d(Mesh)(p) / int2d(Mesh)(1.0);
+p[] -= pMedia;
+
+cout << "Stokes resuelto. Vin=" << vin
+     << "; wr=" << wr
+     << "; rhoS=" << rhoS
+     << "; N=" << meshSize
+     << "; Tmax=" << Tmax << endl;
+
+// ── Guardar estado inicial para restaurar en cada repeticion ─
+savemesh(Mesh, "/tmp/adaptedMesh.msh");
+real[int] uxStokes = ux[];
+real[int] uyStokes = uy[];
+real[int] pStokes  = p[];
+
+system("mkdir -p ../data/sweep");
+
+// ============================================================
+// LOOP SOBRE REPETICIONES
+// ============================================================
+for (int m = 1; m <= 4; m++) {
+
+    cout << "========== Repeticion m=" << m << " ==========" << endl;
+
+    // ── Restaurar malla y solucion Stokes ───────────────────
+    Mesh = readmesh("/tmp/adaptedMesh.msh");
+    ux[] = uxStokes;
+    uy[] = uyStokes;
+    p[]  = pStokes;
+
+    // ── Perturbacion aleatoria: 1% de vin en ux y uy ────────
+    randinit(m * 99991 + 12345);
+    for (int i = 0; i < ux[].n; i++)
+        ux[][i] += vin * 0.01 * (2.0*randreal1() - 1.0);
+    for (int i = 0; i < uy[].n; i++)
+        uy[][i] += vin * 0.01 * (2.0*randreal1() - 1.0);
+
+    // ── Reset de variables fisicas ───────────────────────────
+    xc        = xcInit;
+    Vx        = 0.0;
+    t         = 0.0;
+    dt        = 0.01;
+    inside    = 0;
+    meshError = false;
+    umeshx    = 0;
+
+    chiB = ((x-xc)^2+(y-yc)^2 <= R^2) ? 1.0 : 0.0;
+    rho  = rhoF*(1.0-chiB) + rhoS*chiB;
+
+    // ── Deteccion de oscilaciones ────────────────────────────
+    int  signChanges = 0;
+    real VxPrev      = 0.0;
+    int  maxSteps    = Tmax;
+    bool extended    = false;
+
+    // ── Archivo de salida ────────────────────────────────────
+    string fname = "../data/sweep/" + dw + "_" + rhoS + "_" + vin
+                 + "_" + mulabel + "_" + l + "_" + m + ".txt";
+    ofstream outRun(fname);
+    outRun << "t x vx" << endl;
+
+    // ── Bucle temporal ───────────────────────────────────────
+    for (int n = 0; n < maxSteps; n++) {
+
+        uxOld = ux;
+        uyOld = uy;
+        umag  = sqrt(ux^2 + uy^2);
+
+        t += dt;
+
+        real fxResorte = -rhoS * g * (xc - w/2.0) / l;
+
+        problem NavierStokes([ux, uy, p], [vx, vy, q], solver=UMFPACK)
+            =   int2d(Mesh)( (rho/dt)*(ux*vx+uy*vy) )
+            +   int2d(Mesh)( mu*Ddu(ux,uy,vx,vy) )
+            +   int2d(Mesh)( (mu/eps)*chiB*Ddu(ux,uy,vx,vy) )
+            +   int2d(Mesh)( (1.0/eps)*chiB*uy*vy )
+            -   int2d(Mesh)( p*(dx(vx)+dy(vy)) )
+            -   int2d(Mesh)( q*(dx(ux)+dy(uy)) )
+            +   int2d(Mesh)( 1e-10*p*q )
+            -   int2d(Mesh)( (rho/dt)*(
+                    convect([uxOld-umeshx, uyOld], -dt, uxOld)*vx
+                  + convect([uxOld-umeshx, uyOld], -dt, uyOld)*vy ))
+            +   int2d(Mesh)( chiB * fxResorte * vx )
+            +   on(1, ux=0, uy=-vin)
+            +   on(2, ux=0, uy=-vin)
+            +   on(3, ux=0, uy=-vin)
+            +   on(4, ux=0, uy=-vin);
+
+        NavierStokes;
+
+        real pMed = int2d(Mesh)(p) / int2d(Mesh)(1.0);
+        p[] -= pMed;
+
+        real areaB = int2d(Mesh)(chiB);
+        Vl = int2d(Mesh)(ux*chiB) / areaB;
+
+        real Fhidro = int1d(Mesh, 5)(
+            (-p + 2*mu*dx(ux))*(x-xc)/R
+            + mu*(dy(ux)+dx(uy))*(y-yc)/R
+            );
+        Vx += Fhidro * dt;
+        xc  = xc + dt * Vx;
+
+        outRun << t << " " << xc << " " << Vx << endl;
+
+        // ── Cambio de signo de Vx ────────────────────────────
+        if (VxPrev * Vx < 0.0) signChanges++;
+        VxPrev = Vx;
+
+        // ── Mover malla ──────────────────────────────────────
+        varf vPoisson(dmesh, vdmesh)
+            =   int2d(Mesh)( dx(dmesh)*dx(vdmesh) + dy(dmesh)*dy(vdmesh) )
+            +   on(5, dmesh=Vx*dt)
+            +   on(1,2,3,4, dmesh=0);
+
+        matrix PoissonMat = vPoisson(Dh, Dh);
+        set(PoissonMat, solver=UMFPACK);
+        real[int] PoissonRHS = vPoisson(0, Dh);
+        dmesh[] = PoissonMat^-1 * PoissonRHS;
+
+        if (Mesh.nv <= 0 || checkmovemesh(Mesh, [x+dmesh, y]) <= 0) {
+            cout << "WARNING: triangulos invertidos n=" << n
+                 << " m=" << m << ". Guardando y pasando a siguiente repeticion." << endl;
+            meshError = true;
+            break;   // saltar chequeo de oscilacion
+        }
+
+        umeshx = dmesh / dt;
+        Mesh   = movemesh(Mesh, [x+dmesh, y]);
+
+        chiB = ((x-xc)^2+(y-yc)^2 < R^2) ? 1.0 : 0.0;
+        rho  = rhoF*(1.0-chiB) + rhoS*chiB;
+
+        ux = ux; uy = uy; p = p;
+        uxOld = uxOld; uyOld = uyOld;
+        umeshx = umeshx; dmesh = dmesh;
+
+        inside = ((xc-R) < 1.5*s || (xc+R) > (w-1.5*s)) ? 1 : 0;
+
+        real hTri = int2d(Mesh)(hTriangle) / int2d(Mesh)(1.0);
+        if (n > 0) {
+            if (inside == 1)
+                dt = 0.2 * hTri / (umag[].max + 1e-10);
+            else
+                dt = 0.5 * hTri / (umag[].max + 1e-10);
+            dt = min(dt, 0.5);
+            dt = max(dt, 1e-5);
+        }
+
+        cout << "m=" << m
+             << "  n=" << n
+             << "  xc/w=" << xc/w
+             << "  Vx=" << Vx
+             << "  signs=" << signChanges
+             << "  dt=" << dt
+             << "  inside=" << inside << endl;
+
+        // ── Chequeo al final de los primeros Tmax pasos ──────
+        if (n == Tmax - 1 && !extended) {
+            extended = true;
+            if (signChanges < 8) {
+                maxSteps += 500;
+                cout << "  m=" << m << ": solo " << signChanges
+                     << " cambios de signo extendiendo 500 pasos." << endl;
+            }
+        }
+    }
+
+    if (meshError)
+        cout << "m=" << m << " colision detectada. Guardado: " << fname << endl;
+    else
+        cout << "m=" << m << " completado (" << signChanges
+             << " cambios de signo). Guardado: " << fname << endl;
+}
+
+cout << "Todas las repeticiones completadas." << endl;
