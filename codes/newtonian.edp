@@ -4,22 +4,22 @@ load "UMFPACK64"
 // ============================================================
 // PARAMETROS FISICOS
 // ============================================================
-real wr = 0.044; // (0.033, 0.044, 0.066) 
+real wr = 0.033; // (0.033, 0.044, 0.066) 
 real R = 0.011;
 real w = 1.0 * wr;
 real dw = (2*R)/wr;
 real h = 4 * w;
-real xc = 0.5 * w;
+real xc = 0.5 * w + 0.2 * R;
 real yc = 0.75 * h;
 int meshSize = 50;
 real ratio = h / w;
 real mulabel = 1.0;
 real mu = mulabel * 1.0e-3;
-real vin = 0.143; // (0.023, 0.044, 0.078, 0.111, 0.143);
+real vin = 0.0; 
 real rhoF = 1000.0;
-real rhoS = 1030.0; // (1030, 1105, 1270, 1380) mid(1205)
+real rhoS = 1380.0; 
 real dt = 0.01;
-int  Tmax = 500;
+int  Tmax = 100;
 real eps = 1e-9;
 real hmin = R/20;
 real hmax = h/8;
@@ -105,8 +105,8 @@ cout << "Stokes resuelto. Vin=" << vin
      << "; N=" << meshSize
      << "; Tmax=" << Tmax << endl;
 
-string outputFileName = dw + "_" + rhoS + "_" + vin + "_" + l + ".txt";
-string vtkDir = dw + "_" + rhoS + "_" + vin + "_" + l;
+string outputFileName = dw + "_" + rhoS + "_" + vin + "_" + mulabel + "_" + l + ".txt";
+string vtkDir = dw + "_" + rhoS + "_" + vin + "_" + mulabel + "_" + l;
 
 system("mkdir -p " + vtkDir);
 
@@ -203,7 +203,7 @@ for (int n = 0; n < Tmax; n++) {
         } else {
             dt = 0.5 * hTriangle / (umag[].max + 1e-10);  // CFL = 0.8
         }
-        dt = min(dt, 0.5);
+        dt = min(dt, 0.1);
         dt = max(dt, 1e-5);
     }
 

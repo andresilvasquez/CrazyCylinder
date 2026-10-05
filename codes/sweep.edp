@@ -115,12 +115,31 @@ real[int] uxStokes = ux[];
 real[int] uyStokes = uy[];
 real[int] pStokes  = p[];
 
-system("mkdir -p ../data/sweep");
+system("mkdir -p ../data/rawSim/sweep");
+
+// ── Determinar m de inicio según archivos ya existentes ──────
+int mStart = 1;
+{
+    int found = 0;
+    for (int mi = 1; mi <= 100; mi++) {
+        string testName = "../data/rawSim/sweep/" + dw + "_" + rhoS + "_" + vin
+                        + "_" + mulabel + "_" + l + "_" + mi + ".txt";
+        int exists = system("test -f " + testName);
+        if (exists == 0)
+            found = mi;
+        else
+            break;
+    }
+    mStart = found + 1;
+    if (found > 0)
+        cout << "Encontrados " << found << " archivos previos. "
+             << "Arrancando desde m=" << mStart << endl;
+}
 
 // ============================================================
 // LOOP SOBRE REPETICIONES
 // ============================================================
-for (int m = 1; m <= 4; m++) {
+for (int m = mStart; m <= mStart + 5; m++) {
 
     cout << "========== Repeticion m=" << m << " ==========" << endl;
 
@@ -156,7 +175,7 @@ for (int m = 1; m <= 4; m++) {
     bool extended    = false;
 
     // ── Archivo de salida ────────────────────────────────────
-    string fname = "../data/sweep/" + dw + "_" + rhoS + "_" + vin
+    string fname = "../data/rawSim/sweep/" + dw + "_" + rhoS + "_" + vin
                  + "_" + mulabel + "_" + l + "_" + m + ".txt";
     ofstream outRun(fname);
     outRun << "t x vx" << endl;
@@ -170,7 +189,7 @@ for (int m = 1; m <= 4; m++) {
 
         t += dt;
 
-        real fxResorte = -rhoS * g * (xc - w/2.0) / l;
+        real fxResorte = - rhoS * g * (xc - w/2.0) / l;
 
         problem NavierStokes([ux, uy, p], [vx, vy, q], solver=UMFPACK)
             =   int2d(Mesh)( (rho/dt)*(ux*vx+uy*vy) )
@@ -246,7 +265,7 @@ for (int m = 1; m <= 4; m++) {
                 dt = 0.2 * hTri / (umag[].max + 1e-10);
             else
                 dt = 0.5 * hTri / (umag[].max + 1e-10);
-            dt = min(dt, 0.5);
+            dt = min(dt, 0.1);
             dt = max(dt, 1e-5);
         }
 
