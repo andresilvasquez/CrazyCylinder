@@ -6,7 +6,7 @@ include "getARGV.idp"
 // PARAMETROS DESDE CONSOLA
 // ============================================================
 real wr   = getARGV("-wr",   0.066);
-real rhoS = getARGV("-rhoS", 1030.0);
+real rhoS = getARGV("-rhoS", 1380.0);
 real vin  = getARGV("-vin",  0.143);
 real mulabel = getARGV("-mulabel", 1.0);
 real l       = getARGV("-l",       0.6);
@@ -139,7 +139,7 @@ int mStart = 1;
 // ============================================================
 // LOOP SOBRE REPETICIONES
 // ============================================================
-for (int m = mStart; m <= mStart + 5; m++) {
+for (int m = mStart; m <= mStart + 3; m++) {
 
     cout << "========== Repeticion m=" << m << " ==========" << endl;
 
